@@ -24,4 +24,5 @@ Pod::Spec.new do |spec|
 
   spec.dependency 'OpenTelemetryApi'
   spec.dependency 'OpenTelemetrySdk'
+  spec.dependency 'OpenTelemetryProtocolExporterCommon'
 end
