@@ -22,5 +22,7 @@ Pod::Spec.new do |spec|
   # `swift build --verbose`
   spec.pod_target_xcconfig = { "OTHER_SWIFT_FLAGS" => "-module-name OpenTelemetryProtocolCommon -package-name opentelemetry_swift" }
 
+  spec.dependency 'OpenTelemetryApi'
+  spec.dependency 'OpenTelemetrySdk'
   spec.dependency 'SwiftProtobuf', '~> 1.28.1'
 end
