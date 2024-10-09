@@ -13,11 +13,8 @@ import Foundation
 /// - Note: This restriction means this class is not suitable for dynamic context injection. If you require dynamic context injection, you will need a custom context manager.
 @available(macOS 10.15, iOS 13.0, watchOS 6.0, tvOS 13.0, *)
 public class TaskLocalContextManager: ContextManager {
-#if swift(>=5.9)
-    package static let instance = TaskLocalContextManager()
-#else
+
     static let instance = TaskLocalContextManager()
-#endif
 
     @TaskLocal static var context = [String: AnyObject]()
 
