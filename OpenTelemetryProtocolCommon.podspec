@@ -21,4 +21,6 @@ Pod::Spec.new do |spec|
   # To provide the correct values to the flags `-package-name` and `-module-name` we checked out the outputs from:
   # `swift build --verbose`
   spec.pod_target_xcconfig = { "OTHER_SWIFT_FLAGS" => "-module-name OpenTelemetryProtocolCommon -package-name opentelemetry_swift" }
+
+  spec.dependency 'SwiftProtobuf', '~> 1.20.2'
 end
