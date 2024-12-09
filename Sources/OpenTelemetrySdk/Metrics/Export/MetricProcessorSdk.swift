@@ -6,36 +6,28 @@
 import Foundation
 
 public class MetricProcessorSdk: MetricProcessor {
-    private let lock: Lock
-    var metrics: [Metric]
+  // Используем последовательную очередь для потокобезопасного доступа к metrics
+  private let queue = DispatchQueue(label: "com.example.MetricProcessorSdk.queue")
+  var metrics: [Metric]
 
-    public init() {
-        metrics = [Metric]()
-        lock = Lock()
+  public init() {
+    metrics = [Metric]()
+  }
+
+  /// Завершает текущий цикл сбора и возвращает метрики этого цикла.
+  /// После возвращения метрик массив очищается.
+  public func finishCollectionCycle() -> [Metric] {
+    return queue.sync {
+      let currentMetrics = metrics
+      metrics = []
+      return currentMetrics
     }
+  }
 
-    /// Finish the current collection cycle and return the metrics it holds.
-    /// This is called at the end of one collection cycle by the Controller.
-    /// MetricProcessor can use this to clear its Metrics (in case of stateless).
-    /// - Returns: The list of metrics from this cycle, which are to be exported.
-    public func finishCollectionCycle() -> [Metric] {
-        lock.lock()
-        defer {
-            self.metrics = [Metric]()
-            lock.unlock()
-        }
-        return metrics
+  /// Обрабатываем метрику - добавляем её в список.
+  public func process(metric: Metric) {
+    queue.sync {
+      metrics.append(metric)
     }
-
-    /// Process the metric. This method is called once every collection interval.
-    /// - Parameters:
-    ///   - metric: the metric record.
-    public func process(metric: Metric) {
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-
-        metrics.append(metric)
-    }
+  }
 }

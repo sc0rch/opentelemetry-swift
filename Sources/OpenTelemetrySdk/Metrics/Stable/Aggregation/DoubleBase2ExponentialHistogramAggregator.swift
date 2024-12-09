@@ -7,166 +7,178 @@ import Foundation
 import OpenTelemetryApi
 
 public class DoubleBase2ExponentialHistogramAggregator: StableAggregator {
-    private var reservoirSupplier : () -> ExemplarReservoir
-    private var maxBuckets : Int
-    private var maxScale: Int
+  private var reservoirSupplier : () -> ExemplarReservoir
+  private var maxBuckets : Int
+  private var maxScale: Int
 
-    init(maxBuckets: Int, maxScale: Int, reservoirSupplier: @escaping () -> ExemplarReservoir) {
-        self.maxBuckets = maxBuckets
-        self.maxScale = maxScale
-        self.reservoirSupplier = reservoirSupplier
+  init(maxBuckets: Int, maxScale: Int, reservoirSupplier: @escaping () -> ExemplarReservoir) {
+    self.maxBuckets = maxBuckets
+    self.maxScale = maxScale
+    self.reservoirSupplier = reservoirSupplier
+  }
+
+  public func diff(previousCumulative: PointData, currentCumulative: PointData) throws -> PointData {
+    throw HistogramAggregatorError.unsupportedOperation("This aggregator does not support diff.")
+  }
+
+  public func toPoint(measurement: Measurement) throws -> PointData {
+    throw HistogramAggregatorError.unsupportedOperation("This aggregator does not support toPoint.")
+  }
+
+  public func createHandle() -> AggregatorHandle {
+    return Handle(maxBuckets: maxBuckets, maxScale: maxScale, exemplarReservoir: reservoirSupplier())
+  }
+
+  public func toMetricData(resource: Resource, scope: InstrumentationScopeInfo, descriptor: MetricDescriptor, points: [PointData], temporality: AggregationTemporality) -> StableMetricData {
+    StableMetricData.createExponentialHistogram(
+      resource: resource,
+      instrumentationScopeInfo: scope,
+      name: descriptor.name,
+      description: descriptor.description,
+      unit: descriptor.instrument.unit,
+      data: StableExponentialHistogramData(aggregationTemporality: temporality, points: points)
+    )
+  }
+
+  class Handle : AggregatorHandle {
+    // Вместо Lock используем serial-очередь
+    private let queue = DispatchQueue(label: "com.example.DoubleBase2ExponentialHistogramAggregator.Handle")
+
+    var maxBuckets : Int
+    var maxScale: Int
+
+    var zeroCount: UInt64
+    var sum: Double
+    var min: Double
+    var max: Double
+    var count: UInt64
+    var scale: Int
+
+    var positiveBuckets: DoubleBase2ExponentialHistogramBuckets?
+    var negativeBuckets: DoubleBase2ExponentialHistogramBuckets?
+
+    internal init(maxBuckets: Int, maxScale: Int, exemplarReservoir: ExemplarReservoir) {
+      self.maxBuckets = maxBuckets
+      self.maxScale = maxScale
+
+      self.sum = 0
+      self.zeroCount = 0
+      self.min = Double.greatestFiniteMagnitude
+      self.max = -1
+      self.count = 0
+      self.scale = maxScale
+
+      super.init(exemplarReservoir: exemplarReservoir)
     }
 
-    public func diff(previousCumulative: PointData, currentCumulative: PointData) throws -> PointData {
-        throw HistogramAggregatorError.unsupportedOperation("This aggregator does not support diff.")
+    override func doRecordLong(value: Int) {
+      doRecordDouble(value: Double(value))
     }
 
-    public func toPoint(measurement: Measurement) throws -> PointData {
-        throw HistogramAggregatorError.unsupportedOperation("This aggregator does not support toPoint.")
-    }
+    override func doAggregateThenMaybeReset(startEpochNano: UInt64,
+                                            endEpochNano: UInt64,
+                                            attributes: [String : AttributeValue],
+                                            exemplars: [ExemplarData],
+                                            reset: Bool) -> PointData {
+      return queue.sync {
+        let pointData = ExponentialHistogramPointData(
+          scale: scale,
+          sum: sum,
+          zeroCount: Int64(zeroCount),
+          hasMin: count > 0,
+          hasMax: count > 0,
+          min: min,
+          max: max,
+          positiveBuckets: resolveBuckets(buckets: positiveBuckets, scale: scale, reset: reset),
+          negativeBuckets: resolveBuckets(buckets: negativeBuckets, scale: scale, reset: reset),
+          startEpochNanos: startEpochNano,
+          epochNanos: endEpochNano,
+          attributes: attributes,
+          exemplars: exemplars
+        )
 
-    public func createHandle() -> AggregatorHandle {
-        return Handle(maxBuckets: maxBuckets, maxScale: maxScale, exemplarReservoir: reservoirSupplier())
-    }
-
-    public func toMetricData(resource: Resource, scope: InstrumentationScopeInfo, descriptor: MetricDescriptor, points: [PointData], temporality: AggregationTemporality) -> StableMetricData {
-        StableMetricData.createExponentialHistogram(resource: resource, instrumentationScopeInfo: scope, name: descriptor.name, description: descriptor.description, unit: descriptor.instrument.unit, data: StableExponentialHistogramData(aggregationTemporality: temporality, points: points))
-    }
-
-    class Handle : AggregatorHandle {
-        let lock = Lock()
-        var maxBuckets : Int
-        var maxScale: Int
-
-        var zeroCount: UInt64
-        var sum: Double
-        var min: Double
-        var max: Double
-        var count: UInt64
-        var scale: Int
-
-        var positiveBuckets: DoubleBase2ExponentialHistogramBuckets?
-        var negativeBuckets: DoubleBase2ExponentialHistogramBuckets?
-
-        internal init(maxBuckets: Int, maxScale: Int, exemplarReservoir: ExemplarReservoir) {
-            self.maxBuckets = maxBuckets
-            self.maxScale = maxScale
-            
-            self.sum = 0
-            self.zeroCount = 0
-            self.min = Double.greatestFiniteMagnitude
-            self.max = -1
-            self.count = 0
-            self.scale = maxScale
-            
-            super.init(exemplarReservoir: exemplarReservoir)
+        if reset {
+          sum = 0
+          zeroCount = 0
+          min = Double.greatestFiniteMagnitude
+          max = -1
+          count = 0
+          scale = maxScale
         }
 
-        override func doRecordLong(value: Int) {
-            doRecordDouble(value: Double(value))
+        return pointData
+      }
+    }
+
+    override func doRecordDouble(value: Double) {
+      queue.sync {
+        guard value.isFinite else { return }
+
+        sum += value
+        min = Swift.min(min, value)
+        max = Swift.max(max, value)
+        count += 1
+
+        if value == 0.0 {
+          zeroCount += 1
+          return
         }
 
-        override func doAggregateThenMaybeReset(startEpochNano: UInt64, endEpochNano: UInt64, attributes: [String : AttributeValue], exemplars: [ExemplarData], reset: Bool) -> PointData {
-            lock.lock()
-            defer {
-                lock.unlock()
-            }
-            
-            let pointData = ExponentialHistogramPointData(
-                scale: scale,
-                sum: sum,
-                zeroCount: Int64(zeroCount),
-                hasMin: count > 0,
-                hasMax: count > 0,
-                min: min,
-                max: max,
-                positiveBuckets: resolveBuckets(buckets: positiveBuckets, scale: scale, reset: reset),
-                negativeBuckets: resolveBuckets(buckets: negativeBuckets, scale: scale, reset: reset),
-                startEpochNanos: startEpochNano,
-                epochNanos: endEpochNano,
-                attributes: attributes,
-                exemplars: exemplars
-            )
-            
-            if reset {
-                sum = 0
-                zeroCount = 0
-                min = Double.greatestFiniteMagnitude
-                max = -1
-                count = 0
-                scale = maxScale
-            }
-            
-            return pointData
-        }
-
-        override func doRecordDouble(value: Double) {
-            lock.lock()
-            defer {
-                lock.unlock()
-            }
-            
-            if !value.isFinite {
-                return
-            }
-            
-            sum += value
-            
-            min = Swift.min(min, value)
-            max = Swift.max(max, value)
-            count += 1
-            
-            var buckets: DoubleBase2ExponentialHistogramBuckets
-            if value == 0.0 {
-                self.zeroCount += 1
-                return
-            } else if value > 0.0 {
-                if let positiveBuckets = self.positiveBuckets {
-                    buckets = positiveBuckets
-                } else {
-                    buckets = DoubleBase2ExponentialHistogramBuckets(scale: scale, maxBuckets: maxBuckets)
-                    positiveBuckets = buckets
-                }
+        let isPositive = (value > 0.0)
+        let targetBuckets: DoubleBase2ExponentialHistogramBuckets = {
+          if isPositive {
+            if let b = positiveBuckets {
+              return b
             } else {
-                if let negativeBuckets = negativeBuckets {
-                    buckets = negativeBuckets
-                } else {
-                    buckets = DoubleBase2ExponentialHistogramBuckets(scale: scale, maxBuckets: maxBuckets)
-                    negativeBuckets = buckets
-                }
+              let b = DoubleBase2ExponentialHistogramBuckets(scale: scale, maxBuckets: maxBuckets)
+              positiveBuckets = b
+              return b
             }
-            
-            if !buckets.record(value: value) {
-                downScale(by: buckets.getScaleReduction(value))
-                buckets.record(value: value)
+          } else {
+            if let b = negativeBuckets {
+              return b
+            } else {
+              let b = DoubleBase2ExponentialHistogramBuckets(scale: scale, maxBuckets: maxBuckets)
+              negativeBuckets = b
+              return b
             }
-        }
+          }
+        }()
 
-        private func resolveBuckets(buckets: DoubleBase2ExponentialHistogramBuckets?, scale: Int, reset: Bool) -> ExponentialHistogramBuckets {
-            guard let buckets = buckets else {
-                return EmptyExponentialHistogramBuckets(scale: scale)
-            }
-            
-            let copy = buckets.copy() as! DoubleBase2ExponentialHistogramBuckets
-            
-            if reset {
-                buckets.clear(scale: maxScale)
-            }
-            
-            return copy
+        // Если значение не вместилось в текущий масштаб, уменьшаем масштаб
+        if !targetBuckets.record(value: value) {
+          downScale(by: targetBuckets.getScaleReduction(value))
+          _ = targetBuckets.record(value: value)
         }
-
-        func downScale(by: Int) {
-            if let positiveBuckets = positiveBuckets {
-                positiveBuckets.downscale(by: by)
-                scale = positiveBuckets.scale
-                
-            }
-            
-            if let negativeBuckets = negativeBuckets {
-                negativeBuckets.downscale(by: by)
-                scale = negativeBuckets.scale
-            }
-        }
+      }
     }
+
+    private func resolveBuckets(buckets: DoubleBase2ExponentialHistogramBuckets?,
+                                scale: Int,
+                                reset: Bool) -> ExponentialHistogramBuckets {
+      // Доступ к данным тоже внутри queue.sync, но метод всегда вызывается из неё
+      guard let buckets = buckets else {
+        return EmptyExponentialHistogramBuckets(scale: scale)
+      }
+
+      let copy = buckets.copy() as! DoubleBase2ExponentialHistogramBuckets
+      if reset {
+        buckets.clear(scale: maxScale)
+      }
+      return copy
+    }
+
+    private func downScale(by reduction: Int) {
+      // downScale тоже вызывается изнутри queue.sync
+      if let positiveBuckets = positiveBuckets {
+        positiveBuckets.downscale(by: reduction)
+        scale = positiveBuckets.scale
+      }
+
+      if let negativeBuckets = negativeBuckets {
+        negativeBuckets.downscale(by: reduction)
+        scale = negativeBuckets.scale
+      }
+    }
+  }
 }

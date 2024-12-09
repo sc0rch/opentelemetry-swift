@@ -7,20 +7,27 @@
 import Foundation
 import OpenTelemetryApi
 
-
 class BoundRawHistogramMetricSdkBase<T> : BoundRawHistogramMetric<T> {
-    internal var status : RecordStatus
-    internal var statusLock = Lock()
-    
-    init(recordStatus: RecordStatus) {
-        status = recordStatus
-        super.init()
+  internal var status: RecordStatus
+  // Заменяем Lock на очередь
+  private let statusQueue = DispatchQueue(label: "com.example.BoundRawHistogramMetricSdkBase.statusQueue")
+
+  init(recordStatus: RecordStatus) {
+    status = recordStatus
+    super.init()
+  }
+
+  func checkpoint() {
+    // noop или ваша логика
+  }
+
+  func getMetrics() -> [MetricData] {
+    fatalError()
+  }
+
+  func syncStatus(_ block: () -> Void) {
+    statusQueue.sync {
+      block()
     }
-    
-    func checkpoint() {
-    }
-    
-    func getMetrics() -> [MetricData] {
-        fatalError()
-    }
+  }
 }

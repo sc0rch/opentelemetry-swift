@@ -7,78 +7,90 @@ import Foundation
 import OpenTelemetryApi
 
 class RawCounterMetricSdkBase<T> : RawCounterMetric {
-    let bindUnbindLock = Lock()
-    public private(set) var boundInstruments = [LabelSet: BoundRawCounterMetricSdkBase<T>]()
-    let metricName : String
-    
-    init(name: String) {
-        metricName = name
+  // Вместо Lock используется последовательная очередь
+  private let queue = DispatchQueue(label: "com.example.RawCounterMetricSdkBase.queue")
+
+  // Доступ к boundInstruments только через queue.sync
+  private var _boundInstruments = [LabelSet: BoundRawCounterMetricSdkBase<T>]()
+  public private(set) var boundInstruments: [LabelSet: BoundRawCounterMetricSdkBase<T>] {
+    get {
+      return queue.sync { _boundInstruments }
     }
-    
-    func record(sum: T, startDate: Date, endDate: Date, labels: [String : String]){
-        // noop
+    set {
+      queue.sync { _boundInstruments = newValue }
     }
-    
-    func record(sum: T, startDate: Date, endDate: Date, labelset: LabelSet) {
-     // noop
+  }
+
+  let metricName : String
+
+  init(name: String) {
+    metricName = name
+  }
+
+  func record(sum: T, startDate: Date, endDate: Date, labels: [String : String]) {
+    // noop
+  }
+
+  func record(sum: T, startDate: Date, endDate: Date, labelset: LabelSet) {
+    // noop
+  }
+
+  func bind(labelset: LabelSet) -> BoundRawCounterMetric<T> {
+    return bind(labelset: labelset, isShortLived: false)
+  }
+
+  internal func bind(labelset: LabelSet, isShortLived: Bool) -> BoundRawCounterMetric<T> {
+    // Используем очередь для потокобезопасного доступа к boundInstruments
+    let boundInstrument: BoundRawCounterMetricSdkBase<T> = queue.sync {
+      if let existing = _boundInstruments[labelset] {
+        return existing
+      } else {
+        let status = isShortLived ? RecordStatus.updatePending : RecordStatus.bound
+        let newInstrument = createMetric(recordStatus: status)
+        _boundInstruments[labelset] = newInstrument
+        return newInstrument
+      }
     }
-    
-    
-    func bind(labelset: LabelSet) -> BoundRawCounterMetric<T> {
-        bind(labelset: labelset, isShortLived: false)
-    }
-    
-    
-   internal func bind(labelset: LabelSet, isShortLived: Bool) -> BoundRawCounterMetric<T> {
-        var boundInstrument : BoundRawCounterMetricSdkBase<T>?
-        bindUnbindLock.withLockVoid {
-            boundInstrument = boundInstruments[labelset]
-            
-            if boundInstrument == nil {
-                let status = isShortLived ? RecordStatus.updatePending : RecordStatus.bound
-                boundInstrument = createMetric(recordStatus: status)
-                boundInstruments[labelset] = boundInstrument
-            }
+
+    // Обновляем статус инструмента под защитой его собственного statusLock
+    boundInstrument.syncStatus {
+      switch boundInstrument.status {
+      case .noPendingUpdate:
+        boundInstrument.status = .updatePending
+      case .candidateForRemoval:
+        // Если инструмент помечен для удаления, нужно убедиться, что он снова в словаре
+        // и обновить статус.
+        queue.sync {
+          boundInstrument.status = .updatePending
+          if _boundInstruments[labelset] == nil {
+            _boundInstruments[labelset] = boundInstrument
+          }
         }
-        
-        boundInstrument!.statusLock.withLockVoid {
-            switch boundInstrument!.status {
-            case .noPendingUpdate:
-                boundInstrument!.status = .updatePending
-                break;
-            case .candidateForRemoval:
-                bindUnbindLock.withLockVoid {
-                    boundInstrument!.status = .updatePending
-                    if boundInstruments[labelset] == nil {
-                        boundInstruments[labelset] = boundInstrument!
-                    }
-                }
-                break;
-            case .bound, .updatePending:
-                break;
-            }
+      case .bound, .updatePending:
+        break
+      }
+    }
+
+    return boundInstrument
+  }
+
+  func bind(labels: [String : String]) -> BoundRawCounterMetric<T> {
+    return bind(labelset: LabelSet(labels: labels), isShortLived: false)
+  }
+
+  internal func unBind(labelSet: LabelSet) {
+    queue.sync {
+      guard let boundInstrument = _boundInstruments[labelSet] else { return }
+      boundInstrument.syncStatus {
+        if boundInstrument.status == .candidateForRemoval {
+          _boundInstruments[labelSet] = nil
         }
-        return boundInstrument!
+      }
     }
-    
-    func bind(labels: [String : String]) -> BoundRawCounterMetric<T> {
-        return bind(labelset: LabelSet(labels: labels), isShortLived: false)
-    }
-            
-    internal func unBind(labelSet: LabelSet) {
-        bindUnbindLock.withLockVoid {
-            if let boundInstrument = boundInstruments[labelSet] {
-                boundInstrument.statusLock.withLockVoid {
-                    if boundInstrument.status == .candidateForRemoval {
-                        boundInstruments[labelSet] = nil
-                    }
-                }
-            }
-        }
-    }
-    
-    func createMetric(recordStatus: RecordStatus) -> BoundRawCounterMetricSdkBase<T> {
-        //noop
-        fatalError()
-    }
+  }
+
+  func createMetric(recordStatus: RecordStatus) -> BoundRawCounterMetricSdkBase<T> {
+    // noop
+    fatalError()
+  }
 }

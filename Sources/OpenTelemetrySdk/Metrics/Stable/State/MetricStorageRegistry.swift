@@ -7,44 +7,37 @@ import Foundation
 import OpenTelemetryApi
 
 public class MetricStorageRegistry {
-    private var lock = Lock()
+    private let queue = DispatchQueue(label: "com.example.MetricStorageRegistry.queue")
     private var registry = [MetricDescriptor : MetricStorage]()
     
-    
     func getStorages() -> [MetricStorage] {
-        lock.lock()
-        defer {
-            lock.unlock()
+        return queue.sync {
+            Array(registry.values)
         }
-        return Array(registry.values)
     }
     
     func register(newStorage : MetricStorage) -> MetricStorage {
-        let descriptor = newStorage.metricDescriptor
-        lock.lock()
-        defer {
-            lock.unlock()
-        }
-        guard let storage = registry[descriptor] else {
-            registry[descriptor] = newStorage
-            return newStorage
-        }
-        
-        for storage in registry.values {
-            if storage as AnyObject === newStorage as AnyObject {
-                continue
-            }
+        return queue.sync {
+            let descriptor = newStorage.metricDescriptor
             
-            let existing = storage.metricDescriptor
-            
-            if existing.name.lowercased() == descriptor.name.lowercased() && existing != descriptor {
-                // todo: log warning
-                break
-                
+            // Проверяем, есть ли уже хранилище с таким дескриптором
+            if let storage = registry[descriptor] {
+                // Если есть, проверим совпадения по имени с другими дескрипторами (игнорируя регистр)
+                for existingStorage in registry.values {
+                    if existingStorage !== newStorage {
+                        let existing = existingStorage.metricDescriptor
+                        if existing.name.lowercased() == descriptor.name.lowercased(), existing != descriptor {
+                            // TODO: Логгирование предупреждения о конфликте имен
+                            break
+                        }
+                    }
+                }
+                return storage
+            } else {
+                // Если хранилища ещё нет, добавим новое
+                registry[descriptor] = newStorage
+                return newStorage
             }
         }
-        
-        return storage
     }
 }
-
